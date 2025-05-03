@@ -653,3 +653,281 @@ df_from_mongo.show(5, false)
 ```
 
 #image("mongo_routes.png")
+
+= Analisis de Datos en el Data Lake
+Exploración, Limpieza y Preparación de Datos para Análisis
+
+*Prerequisitos:* Precargar los datos ingestados
+
+_Nota: Todo se encuentra condensado aquí para facilitar la realización de la práctica, pero cada paso se encuentra propiamente explicado en su sección correspondiente._
+
+```scala
+// 1. Cargar Routes desde .csv
+val ruta_routes_dat = "/home/bigdata/Descargas/practica/routes.dat"
+
+val routesSchema = StructType(Array(
+  StructField("airline", StringType, true,
+  StructField("airline_id", StringType, true),
+  StructField("source_airport", StringType, true),
+  StructField("source_airport_id", StringType, true),
+  StructField("dest_airport", StringType, true),
+  StructField("dest_airport_id", StringType, true),
+  StructField("codeshare", StringType, true),
+  StructField("stops", IntegerType, true),
+  StructField("equipment", StringType, true)
+))
+
+val df_routes = spark.read.schema(routesSchema).option("nullValue", "\\N").csv(ruta_routes_dat)
+
+// 2. Cargar Airports desde Postgres
+val jdbc_url = "jdbc:postgresql://localhost:5432/postgres" // Ajusta DB si es otra
+val db_table_airports = "airports"
+val db_user = "postgres"
+val db_password = "pass"
+
+val connectionProperties = new Properties()
+connectionProperties.put("user", db_user)
+connectionProperties.put("password", db_password)
+connectionProperties.put("driver", "org.postgresql.Driver")
+
+// Parámetros de particionamiento rpecio
+val partition_column = "airport_id"
+val lower_bound = 1
+val upper_bound = 15000
+val num_partitions = 4
+
+// Leer desde Postgres
+val df_airports = spark.read.jdbc(jdbc_url, db_table_airports, partition_column, lower_bound, upper_bound, num_partitions, connectionProperties)
+
+// 3. Cargar Airlines desde HDFS Parquet
+val ruta_airlines_hdfs = "hdfs://localhost:9000/practica/airlines/"
+val df_airlines = spark.read.parquet(ruta_airlines_hdfs)
+```
+
+_Nota: El crear vistas temporales ayuda en SparkSQL_
+```scala
+df_airports.createOrReplaceTempView("airports_view")
+df_airlines.createOrReplaceTempView("airlines_view")
+```
+---
+
+Se plantean una serie de preguntas con los datos que acaban de ser volcados al lago de datos y que deben ser resueltas a través de operaciones analíticas con Apache Spark utilizando tanto la #highlight[API de Dataframe] como con #highlight[sentencias SQL].
+
+== Consultas
+
+- *Consulta 1: Aeropuerto a mayor altitud*
+  ```scala
+  // a) DataFrame API
+  df_airports
+    .filter(col("altitude_meters").isNotNull) // Filtrado de nulls previo
+    .orderBy(desc("altitude_meters"))
+    .select("name", "city", "country", "altitude_meters")
+    .limit(1)
+    .show(false)
+
+  // b) SparkSQL
+  spark.sql("""
+    SELECT name, city, country, altitude_meters
+    FROM airports_view
+    WHERE altitude_meters IS NOT NULL
+    ORDER BY altitude_meters DESC
+    LIMIT 1
+  """).show(false)
+  ```
+
+#image("aeropuerto_alto.png")
+
+_Respuesta: Daocheng Yading Airport - Daocheng (China)._
+
+- *Consulta 2: Número de aeropuertos en España*
+  ```scala
+  // a) Dataframe API
+  val countSpain = df_airports.filter(col("country") === "Spain").count()
+
+  // b) SparkSQL
+  spark.sql("""
+    SELECT count(*) as num_aeropuertos_spain
+    FROM airports_view
+    WHERE country = 'Spain'
+  """).show()
+  ```
+
+#image("aeropuertos_spain.png")
+
+_Respuesta: 64 aeropuertos._
+
+- *Consulta 3: Aeropuertos con aeropuertos DST='E' (horario europeo)*
+  ```scala
+  // a) Dataframe API
+  df_airports
+    .filter(col("dst") === "E")
+    .select("country")
+    .distinct()
+    .orderBy("country")
+    .show(false)
+  ```
+#image("european_df.png")
+
+  ```scala
+  // b) SparkSQL
+  spark.sql("""
+    SELECT DISTINCT country
+    FROM airports_view
+    WHERE dst = 'E'
+    ORDER BY country
+  """).show(false)
+  ```
+#image("european_sql.png")
+
+- *Consulta 4: Aerolíneas totales en EEUU*
+  ```scala
+  // a) Dataframe API
+  val countUSA = df_airlines.filter(col("country") === "United States").count()
+  // b) SparkSQL
+  spark.sql("""
+    SELECT count(*) as num_aerolineas_usa
+    FROM airlines_view
+    WHERE country = 'United States'
+  """).show()
+  ```
+#image("aerolineas_eeuu.png")
+
+_Respuesta: 1099 aerolíneas estadounidenses._
+
+- *Consulta 5: Países con más aerolíneas inactivas*
+  ```scala
+  // a) Dataframe API
+  df_airlines
+    .filter(col("active") === false)
+    .groupBy("country")
+    .count()
+    .orderBy(desc("count"))
+    .limit(10) // Top 10
+    .withColumnRenamed("count", "inactive_count") // Por claridad
+    .show(false)
+  ```
+
+  #image("inactive_df.png")
+
+  ```scala
+  // b) SparkSQL
+  spark.sql("""
+    SELECT country, count(*) as inactive_count
+    FROM airlines_view
+    WHERE active = false
+    GROUP BY country
+    ORDER BY inactive_count DESC
+    LIMIT 10
+  """).show(false)
+  ```
+  #image("inactive_sql.png")
+
+- *Consulta 6: Aeropuertos con líneas en activo `&&` latitud > 80*
+
+  ```scala
+  // a) Datframe API
+  // 1. Países con aerolíneas activas
+  val activeAirlineCountries = df_airlines
+                               .filter(col("active") === true)
+                               .select("country")
+                               .distinct()
+
+  // 2. Países con aeropuertos en alta latitud
+  val highLatAirportCountries = df_airports
+                                .filter(col("latitude") > 80)
+                                .select("country")
+                                .distinct()
+
+  // 3. Inner Join sobre'country'
+  val resultCountries = activeAirlineCountries.join(
+      highLatAirportCountries,
+      activeAirlineCountries("country") === highLatAirportCountries("country"), // Condición del Join
+      "inner").select(activeAirlineCountries("country")) // Solo columna país
+
+  resultCountries.show(false)
+  ```
+  #image("latitude_df.png")
+
+  ```scala
+  // b) SparkSQL
+  spark.sql("""
+    SELECT DISTINCT al.country
+    FROM airlines_view al
+    INNER JOIN airports_view ap ON al.country = ap.country
+    WHERE al.active = true AND ap.latitude > 80
+  """).show(false)
+  ```
+
+  #image("latitude_sql.png")
+
+_Nota: Otra forma de hacerlo sería con `INTERSECT`_
+
+```scala
+spark.sql("""
+  SELECT country FROM airlines_view WHERE active = true
+  INTERSECT
+  SELECT country FROM airports_view WHERE latitude > 80
+""").show(false)
+```
+
+== Persistir datos agregados
+Crear una tabla llamada `aggregations` que guarde sus datos en formato *parquet* en la ruta `/practica/aggregations/` de HDFS
+
+#text(font: "Atkinson Hyperlegible")[*Pregunta:* ¿Cuántas rutas sin paradas (`stops`) a destinos con una altitud (`altitude`) mayor a 200 metros se hicieron por país (`country`) con aerolíneas que ya no están activas (`active`)?]
+
+*Prerequisitos:* Precargar los datos ingestados
+
+#underline[Paso 1: Filtrar los Dataframes]
+```scala
+val df_routes_filtered = df_routes.filter(col("stops") === 0)
+val df_airlines_filtered = df_airlines
+                            .filter(col("active") === false)
+                            .select(col("airline_id"), col("country").alias("airline_country"))
+val df_airports_filtered = df_airports
+                            .filter(col("altitude_meters") > 200)
+                            // airport_id a String para el join con routes
+          .select(col("airport_id").cast(StringType).alias("dest_airport_id_str"))
+```
+#image("filtered_df.png")
+
+#underline[Paso 2: JOIN a los Dataframes filtrados]
+```scala
+// Join 1: Rutas sin paradas con Aerolíneas inactivas
+val df_joined_1 = df_routes_filtered.join(
+    df_airlines_filtered,
+    df_routes_filtered("airline_id") === df_airlines_filtered("airline_id"),
+    "inner" // Solo rutas que coincidan con aerolíneas inactivas
+  )
+  // Quitar ID duplicado de aerolínea
+  .drop(df_airlines_filtered("airline_id"))
+
+// Join 2: Resultado anterior con Aeropuertos de destino altos
+val df_joined_final = df_joined_1.join(
+    df_airports_filtered,
+  df_joined_1("dest_airport_id") === df_airports_filtered("dest_airport_id_str"),
+    "inner" // Solo rutas que lleguen a aeropuertos altos
+  )
+
+```
+#image("join_filtered.png")
+
+#underline[Paso 3: Agrupar por Aerolínea y contar]
+```scala
+val df_aggregation_result = df_joined_final
+.groupBy("airline_country")
+.count() // Filas (rutas) por grupo
+.withColumnRenamed("count", "num_routes")
+.withColumnRenamed("airline_country", "country") // Nombre final de columna país
+.orderBy(desc("num_routes"))
+```
+#image("aggregation_result.png")
+
+#underline[Paso 4: Guardar los resultados en parquet]
+```scala
+val ruta_salida_aggregations = "hdfs://localhost:9000/practica/aggregations/"
+
+df_aggregation_result.write
+                     .mode("overwrite")
+                     .parquet(ruta_salida_aggregations)
+```
+#image("parquet_save.png")
