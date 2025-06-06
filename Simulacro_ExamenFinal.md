@@ -1,7 +1,5 @@
 # Simulacro Examen Final
 
-[Anuncios de Blackboard](https://www.notion.so/Anuncios-de-Blackboard-201dd42276b980969c2cc7dbe6f880f0?pvs=21)
-
 ## Pregunta 1
 
 En este ejercicio, vamos a utilizar datos desestrucutados sobre tweets de temática financiera para convertirlos en datos estructurados, analizarlos y volcar ciertos datos sobre un sink de Streaming (topic de Kafka). El comando o código (se especificará si deberá responder con la API de Dataframe o con sentencias spark.sql) utilizado en cada paso debe ser incluído en formato texto en el campo de respuesta de la pregunta de Blackboard como solución final:

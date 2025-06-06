@@ -1,0 +1,106 @@
+En este ejercicio, vamos a utilizar, por un lado, datos desestructurados sobre perros registrados en un refugio animal y, por otro, datos estructurados con información sobre razas de perros. Posteriormente y, después de algunas transformaciones, se deberán volcar ciertos datos sobre un sink de Streaming (topic de Kafka). El comando o código utilizado en cada paso debe ser incluído en formato texto en el campo de respuesta de la pregunta de Blackboard como solución final:
+
+- Paso 1: Descargar los ficheros de datos (No requiere incluir los comandos en la solución final) y explora el contenido del fichero csv (por ejemplo, con el comando head)
+
+unix-shell> wget -P /home/bigdata/Descargas/ https://gist.githubusercontent.com/mafernandez-stratio/f79505ec0d69199f8e80c93a6005a8aa/raw/43eb90cff53ec9e3f7cb6daeda5b305ef42e389a/dogs_shelter.txt
+
+unix-shell> wget -P /home/bigdata/Descargas/ https://gist.githubusercontent.com/mafernandez-stratio/1402d7d2fdd900707b2f9997441d8b42/raw/7bcd6fa2e4aee41438956139cc9380b754337730/dogs_breeds.csv
+
+- (0.25) Paso 2: Arranca HDFS y copia el fichero dogs_shelter.txt a la ruta /data/dogs/ de HDFS y el fichero dogs_breeds.csv a la ruta /data/breeds/
+
+bin/start-dfs.sh
+hdfs dfs -mkdir -p /data/dogs
+hdfs dfs -mkdir -p /data/breeds
+hdfs dfs -copyFromLocal ~/Descargas/dogs_shelter.txt /data/dogs/
+hdfs dfs -copyFromLocal ~/Descargas/dogs_breeds.csv /data/breeds/
+
+- (0.5) Paso 3: Arranca la shell de Spark con la dependencia del conector de Kafka (--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.3) y crea una tabla (NO debe ser una tabla temporal) con nombre dogbreeds con los datos sobre razas (breeds) de perros albergados en HDFS (incluye las opciones del datasource de csv que estimes oportunas tras haber realizado la exploración del fichero en el paso anterior):
+
+bin/spark-shell --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.3
+
+import spark.implicits._
+import org.apache.spark.sql.functions._
+
+spark.sql("CREATE TABLE dogbreeds USING csv OPTIONS (path 'hdfs://localhost:9000/data/breeds/dogs_breeds.csv', inferSchema 'true', header 'true' )").collect()
+
+spark.read.option("header", "true").option("inferSchema", "true").option("delimiter", ",").csv("hdfs://localhost:9000/data/breeds/dogs_breeds.csv").write.mode("overwrite").saveAsTable("dogbreeds")
+
+- (0.25) Paso 4: Genera un RDD (dogsRDD) que cargue las líneas de los datos sobre los perros del refugio (shelter) albergados en HDFS
+
+val dogsRDD = sc.textFile("hdfs://localhost:9000/data/dogs/dogs_shelter.txt")
+
+- (1) Paso 5: Convierte este RDD dogsRDD en un Dataframe (dogsDF) con la siguiente estructura:
+
+scala> dogsDF.printSchema
+root
+ |-- id: integer (nullable = false)
+ |-- name: string (nullable = true)
+ |-- raza: string (nullable = true)
+ |-- pais_nacimiento: string (nullable = true)
+ |-- edad: integer (nullable = false)
+ |-- peso: integer (nullable = false)
+ |-- altura_cms: integer (nullable = false)
+
+NOTA 1: Ten en cuenta que la primera línea de dogs_shelter.txt es una cabecera con metadatos, por tanto, esta primera línea no contiene datos
+
+NOTA 2: Si tenemos la línea: "1&&&1:RHUBARB&&&1:Cheagle&&&1:Guam&&&1:12&&&1:2&&&1:43", nuestro Dataframe dogsDF contendrá una fila donde -> id=1, name="RHUBARB", raza="Cheagle", pais_nacimiento="Guam", edad=12, peso=2, altura_cms=43
+
+val dogsShelterRDD = dogsRDD.filter(x => !x.equalsIgnoreCase("id&&&name&&&raza&&&pais_nacimiento&&&edad&&&peso&&&altura_cms"))
+case class Dog(id: Int, name: String, raza: String, pais_nacimiento: String, edad: Int, peso: Int, altura_cms: Int)
+val dogsDF = dogsShelterRDD.map(_.split("&&&").map(_.split(":").last)).map(row => Dog(row(0).toInt, row(1), row(2), row(3), row(4).toInt, row(5).toInt, row(6).toInt)).toDF
+
+- (0.25) Paso 6: Registra el Dataframe dogsDF como una tabla temporal con el nombre dogs_shelter
+
+dogsDF.registerTempTable("dogs_shelter")
+
+- (0.5) Paso 7: Crea una tabla (NO debe ser una tabla temporal) con el nombre dogs que sea el resultado de realizar una operación JOIN entre las tablas dogbreeds (utilizando la columna Breed_Name) y dogs_shelter (utilizando la columna raza)
+
+spark.sql("CREATE TABLE dogs USING parquet OPTIONS (path 'hdfs://localhost:9000/data/alldogs/') AS SELECT * FROM dogbreeds db, dogs_shelter ds WHERE db.Breed_Name=ds.raza")
+
+spark.sql("CREATE TABLE dogs USING parquet AS SELECT s.*, b.* FROM dogs_shelter s JOIN dogbreeds b ON s.raza = b.Breed_Name")
+
+- (0.25) Paso 8: ¿Cuál es la media de la columna Easy_To_Train de la tabla dogs?
+
+spark.sql("SELECT avg(Easy_To_Train) FROM dogs LIMIT 1").show(500, false)
+
+spark.sql("SELECT AVG(Easy_To_Train) AS media_entrenabilidad FROM dogs").show(500, false)
+
+// Resultado esperado: 3.409
+
+- (0.25) Paso 9: ¿Cuántos perros hay de cada tamaño (Dog_Size) en función de su raza (Breed_Name/raza) en la tabla dogs?
+
+spark.sql("SELECT Breed_Name, Dog_Size, COUNT(*) AS count_Dog_Size FROM dogs GROUP BY Breed_Name, Dog_Size ORDER BY Breed_Name").show(10, false)
+
+spark.sql("SELECT raza, Dog_Size, COUNT(*) AS count_Dog_Size FROM dogs GROUP BY raza, Dog_Size ORDER BY raza").show(10, false)
+
+- (0.25) Paso 10: ¿Cuál es la edad máxima (edad) por cada país de nacimiento (pais_nacimiento) de los perros que pertenecen a una raza cuya inteligencia (Intelligence) es mayor que 4?
+
+spark.sql("SELECT max(edad), pais_nacimiento FROM dogs WHERE Intelligence>4 GROUP BY pais_nacimiento").show(500, false)
+
+spark.sql("SELECT ds.pais_nacimiento, MAX(ds.edad) AS edad_maxima FROM dogs ds WHERE ds.Intelligence > 4 GROUP BY ds.pais_nacimiento ORDER BY ds.pais_nacimiento").show(500, false)
+
+- (0.25) Paso 11: Inicia un servicio de Kafka (es decir, levantar un Broker de Kafka), crea el topic dogs y, posteriormente, una consola consumidor de Kafka del topic dogs, que pertenezca al consumer group grupo1, que imprima la clave de cada mensaje y que utilice los caracteres --> como separador entre la clave y el valor
+
+bin/confluent local services kafka start
+bin/kafka-topics --create --topic dogs --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+bin/kafka-topics --list --bootstrap-server localhost:9092
+bin/kafka-console-consumer --bootstrap-server localhost:9092 --topic dogs --group grupo1 --property print.key=true --property key.separator=" --> "
+
+- (0.25) Paso 12: Responde a la siguiente pregunta volcando los datos resultantes sobre el topic dogs: ¿Cuales son los nombres y su potencial a ganar peso (Potential_For_Weight_Gain) de los perros cuya altura real (altura_cms) es mayor que la altura media de su raza (Avg_Height_cm)?
+NOTA: Utiliza el datasource "kafka" y su interfaz batch (dataframe.write)
+
+spark.sql("SELECT name AS key, cast(Potential_For_Weight_Gain AS STRING) AS value FROM dogs WHERE altura_cms > Avg_Height_cm ").write.format("kafka").option("kafka.bootstrap.servers", "localhost:9092").option("topic", "dogs").save()
+
+import org.apache.spark.sql.functions._
+val dogsDF = spark.table("dogs")
+val filteredDF = dogsDF.filter(col("altura_cms") > col("Avg_Height_cm")).select("name", "Potential_For_Weight_Gain")
+filteredDF.selectExpr("CAST(name AS STRING) AS key", "CAST(Potential_For_Weight_Gain AS STRING) AS value")
+	.write.format("kafka").option("kafka.bootstrap.servers", "localhost:9092").option("topic", "dogs").save()
+
+val dogsStream = spark.readStream.table("dogs")
+val filteredStream = dogsStream.filter(col("altura_cms") > col("Avg_Height_cm")).select("name", "Potential_For_Weight_Gain")
+filteredStream.selectExpr("CAST(name AS STRING) AS key", "CAST(Potential_For_Weight_Gain AS STRING) AS value")
+	.writeStream.format("kafka").option("kafka.bootstrap.servers", "localhost:9092").option("topic", "dogs")
+  .option("checkpointLocation", "/tmp/dogs").start()
+
+spark.streams.active.head.stop

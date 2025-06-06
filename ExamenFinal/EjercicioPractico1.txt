@@ -1,0 +1,127 @@
+En este ejercicio, vamos a utilizar datos sobre terremotos producidos en el año 2023 (se incluye un documento PDF con el diccionario de los metadatos). El comando o código utilizado en cada paso debe ser incluído en formato texto en el campo de respuesta de la pregunta de Blackboard como solución final:
+
+- (0) Paso 1: Descargar el fichero de datos (No requiere incluir los comandos en la solución final) y explora el contenido del fichero csv (por ejemplo, con el comando head)
+
+unix-shell> wget -P /home/bigdata/Descargas/ https://gist.githubusercontent.com/mafernandez-stratio/94c100fdaed6625d17423093206b870d/raw/17c48dabe0ceecea0b59d251966962fae6aba0c4/earthquakes_2023.csv
+
+- (0.25) Paso 2: Arranca HDFS y copia el fichero earthquakes_2023.csv a la ruta /data/earthquakes/
+
+sbin/start-dfs.sh
+bin/hdfs dfs -mkdir -p /data/earthquakes
+bin/hdfs dfs -copyFromLocal /home/bigdata/Descargas/earthquakes_2023.csv /data/earthquakes/
+
+- (0.5) Paso 3: Arranca la shell de Spark y crea una tabla con nombre earthquakes_2023 (NO debe ser una tabla temporal) con los datos sobre terremotos albergados en HDFS (incluye las opciones del datasource de csv que estimes oportunas tras haber realizado la exploración del fichero en el paso anterior):
+
+bin/spark-shell
+spark.sql("CREATE TABLE earthquakes_2023 USING csv OPTIONS (path 'hdfs://localhost:9000/data/earthquakes/', header 'true', inferSchema 'true')")
+
+- (0.25) Paso 4: Genera un Dataframe (df0) a partir de la tabla earthquakes_2023 que descarte aquellas filas que tengan en la columna dmin un valor nulo
+
+import org.apache.spark.sql.types._
+val df0 = spark.sql("SELECT * FROM earthquakes_2023").filter("dmin IS NOT NULL")
+val df0 = spark.table("earthquakes_2023").filter(col("dmin").isNotNull)
+val df0 = spark.table("SELECT * FROM earthquakes_2023").na.drop(Seq("dmin"))
+
+- (0.25) Paso 5: Obtén en una variable de Scala el listado de todas las columnas numéricas (DoubleType, IntegerType, LongType) del df0
+
+import org.apache.spark.sql.types._
+val numericColNames1 = df0.schema.filter(_.dataType.isInstanceOf[NumericType]).map(_.name)
+val numericColNames1 = df0.dtypes.filter{case (_, dtype) => dtype == "IntegerType" || dtype == "LongType" || dtype == "DoubleType"}.map(_._1)
+val numericColumns = df0.schema.fields.filter(field => field.dataType == DoubleType || field.dataType == IntegerType || field.dataType == LongType).map(_.name)
+
+- (0.25) Paso 6: Obtén un resumen de estadísticas (count, mean, stddev, min, max) de estas variables numéricas del Dataframe df0
+
+df0.describe(numericColNames1: _*).show(500, false)
+df0.select(numericColumns.map(col): _*).summary("count", "mean", "stddev", "min", "max")
+statsDF.show(500, false)
+
+- (0.25) Paso 7: Muestra los cuartiles 0, 0.33, 0.66 y 1 de la columna mag
+
+df0.stat.approxQuantile("mag", Array(0.0, 0.33, 0.66, 1.0), 0.0)
+df0.select($"mag").stat.approxQuantile("mag", Array(0, 0.33, 0.66, 1), 0)
+
+- (0.25) Paso 8: Almacena en una variable de Spark los cuartiles 0.33 y 0.66 del paso anterior
+
+val Array(_, q33, q66, _) = df0.stat.approxQuantile("mag", Array(0.0, 0.33, 0.66, 1.0), 0.0)
+
+val quantiles = df0.stat.approxQuantile("mag", Array(0.0, 0.33, 0.66, 1.0), 0.0)
+val (q33, q66) = (quantiles(1), quantiles(2))
+
+- (0.5) Paso 9: Genera un Dataframe (df1) a partir del Dataframe df0 que incluya una nueva columna llamada mag_class y cumpla las siguientes reglas:
+	- Si el valor de la columna mag (magintud) es menor que el cuartil 0.33 (obtenido en el paso anterior), entonces mag_class debe tener el valor "ligero"
+	- Si el valor de la columna mag (magintud) es mayor que el cuartil 0.33 pero menor que el cuartil 0.66 (obtenidos en el paso anterior), entonces mag_class debe tener el valor "moderado"
+	- Si el valor de la columna mag (magintud) es mayor que el cuartil 0.66 (obtenido en el paso anterior), entonces mag_class debe tener el valor "fuerte"
+
+val df1 = df0.withColumn("mag_class", when(col("mag") < q33, "ligero").when(col("mag") < q66, "moderado").otherwise("fuerte"))
+
+val df1 = df0.withColumn("mag_class", lit("ligero")).withColumn("mag_class", when(col("mag") > mag_quartiles(0), "moderado").otherwise(col("mag_class"))).withColumn("mag_class", when(col("mag") > mag_quartiles(1), "fuerte").otherwise(col("mag_class")))
+
+- (0.5) Paso 10: Genera un Dataframe (df2) a partir del Dataframe df1 que, utilizando una función de ventana, incluya la columna avg_sig con la media de la columna sig (significancia) por type (tipo de terremoto)
+
+import org.apache.spark.sql.expressions.Window
+import org.apache.spark.sql.functions._
+val windowSpec = Window.partitionBy("type")
+val df2 = df1.withColumn("avg_sig", avg(col("sig")).over(windowSpec))
+
+val df2 = df1.withColumn("avg_sig", mean("sig").over(Window.partitionBy("type")))
+
+- (0.25) Paso 11: Genera un Dataframe (df3) a partir del Dataframe df2 que contenga solo las siguientes columnas: mag_class, mag, dmin, gap, nst, rms, sig
+
+val df3 = df2.select("mag_class", "mag", "dmin", "gap", "nst", "rms", "sig")
+val df3 = df2.select(col("mag_class"), col("mag"), col("dmin"), col("gap"), col("nst"), col("rms"), col("sig"))
+
+- (0.5) Paso 12: Obtén la correlación de la columna mag con las columnas dmin, gap, nst, rms y sig
+
+val colFeatures = df3.columns.drop(2)
+colFeatures.foreach(fCol => df3.select(corr(fCol, "mag")).show(500, false))
+
+val columnsToCorrelate = Seq("dmin", "gap", "nst", "rms", "sig")
+val correlations = columnsToCorrelate.map { colName =>
+  val corrValue = df3.stat.corr("mag", colName)
+  (colName, corrValue)
+}
+
+- (0.25) Paso 13: Genera un Dataframe (df4) a partir del Dataframe df3 que elimine las columnas de aquellas características (dmin, gap, nst, rms y sig) que tengan una correlación menor a 0.5. Elimina también la columna mag.
+
+val colsToDrop = correlations.filter(_._2 < 0.5).map(_._1) :+ "mag"
+val df4 = colsToDrop.foldLeft(df3){ case(df, colToDrop) => df.drop(colToDrop) }
+
+val df4 = df3.drop("dmin").drop("gap").drop("rms").drop("mag")
+
+- (1) Paso 14: Como paso previo a generar un modelo de regresión logística para predecir el valor de la columna mag_class, realiza al menos 2 transformaciones sobre el Dataframe df4 para obtener un nuevo Dataframe (model_df)
+
+import org.apache.spark.ml.feature._
+val indexer = new StringIndexer().setInputCol("mag_class").setOutputCol("mag_idx")
+val dfIndexed = indexer.fit(df4)
+val df5 = dfIndexed.transform(df4)
+
+val assembler = new VectorAssembler().setInputCols(Array("nst", "sig")).setOutputCol("features")
+val df6 = assembler.transform(df5)
+
+val model_df = df6.select("features", "mag_idx")
+
+- (0.25) Paso 15: Obtén 2 Dataframes a partir del Dataframe model_df. El primer Dataframe (training_df) tendrá aproximadamente el 75% de los datos y el segundo Dataframe (test_df) tendrá aproximadamente el 25% de los datos.
+
+val split = model_df.randomSplit(Array(0.75,0.25))
+val training_df = split.head
+val test_df = split.last
+
+- (0.25) Paso 16: Obtén un modelo de regresión logística basándose en el Dataframe training_df
+
+import org.apache.spark.ml.classification._
+val log_reg_class = new LogisticRegression().setLabelCol("mag_idx")
+val log_reg_model = log_reg_class.fit(training_df)
+
+- (0.25) Paso 17: Obtén las predicciones del modelo a partir del Dataframe training_df y realiza algunas comprobaciones para determinar si nuestro modelo es válido
+
+val train_results = log_reg_model.evaluate(training_df).predictions
+train_results.filter("mag_idx=prediction").count
+train_results.filter("mag_idx!=prediction").count
+train_results.count
+
+- (0.25) Paso 18: Obtén las predicciones del modelo a partir del Dataframe test_df y realiza algunas comprobaciones para determinar si nuestro modelo es válido
+
+val results = log_reg_model.evaluate(test_df).predictions
+results.filter("mag_idx=prediction").count
+results.filter("mag_idx!=prediction").count
+results.count
